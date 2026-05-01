@@ -208,8 +208,14 @@ jobs:
           if [ -n "${MMR_API_BASE_URL}" ]; then
             echo "MMR_API_BASE_URL configured: yes"
             echo "MMR_API_BASE_URL length: ${#MMR_API_BASE_URL}"
+            echo "MMR_API_BASE_URL value: ${MMR_API_BASE_URL}"
           else
             echo "::error::MMR_API_BASE_URL is empty."
+            exit 1
+          fi
+
+          if ! printf '%s' "${MMR_API_BASE_URL}" | grep -Eq '^https?://'; then
+            echo "::error::MMR_API_BASE_URL must start with http:// or https://"
             exit 1
           fi
 
@@ -218,6 +224,15 @@ jobs:
             echo "MMR_API_KEY length: ${#MMR_API_KEY}"
           else
             echo "::error::MMR_API_KEY is empty."
+            exit 1
+          fi
+
+          echo "Checking MMR API reachability from deployment runner"
+          if curl --silent --show-error --fail --location --max-time 20 \
+            "${MMR_API_BASE_URL%/}/swagger" >/dev/null; then
+            echo "MMR API reachable at ${MMR_API_BASE_URL%/}/swagger"
+          else
+            echo "::error::Cannot reach MMR API at ${MMR_API_BASE_URL} from the deployment workflow."
             exit 1
           fi
 
@@ -271,6 +286,45 @@ jobs:
             --query "properties.template.containers[0].env[].name" \
             -o tsv
 
+          echo "Effective MMRCalculationAPI env entries:"
+          az containerapp show \
+            --name "${API_CONTAINER_APP_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --query "properties.template.containers[0].env[?name=='MMRCalculationAPI__BaseUrl' || name=='MMRCalculationAPI__ApiKey']" \
+            -o json
+
+      - name: MMR API deploy diagnostics (preflight)
+        if: inputs.component == 'mmr-api'
+        env:
+          MMR_API_KEY: ${{ secrets.MMR_API_KEY }}
+          MMR_API_CONTAINER_APP_NAME: ${{ secrets.MMR_API_CONTAINER_APP_NAME }}
+          RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
+        run: |
+          echo "MMR API deploy preflight diagnostics"
+          echo "Container app: ${MMR_API_CONTAINER_APP_NAME}"
+          echo "Resource group: ${RESOURCE_GROUP}"
+
+          if [ -n "${MMR_API_KEY}" ]; then
+            echo "MMR_API_KEY configured: yes"
+            echo "MMR_API_KEY length: ${#MMR_API_KEY}"
+          else
+            echo "::error::MMR_API_KEY is empty. It is required as ADMIN_SECRET for mmr-api."
+            exit 1
+          fi
+
+      - name: Ensure MMR API container app secrets
+        if: inputs.component == 'mmr-api'
+        env:
+          MMR_API_KEY: ${{ secrets.MMR_API_KEY }}
+          MMR_API_CONTAINER_APP_NAME: ${{ secrets.MMR_API_CONTAINER_APP_NAME }}
+          RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
+        run: |
+          echo "Creating/updating MMR API container app secrets"
+          az containerapp secret set \
+            --name "${MMR_API_CONTAINER_APP_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --secrets mmr-admin-secret="${MMR_API_KEY}"
+
       - name: Deploy mmr-api release
         if: inputs.component == 'mmr-api'
         uses: azure/container-apps-deploy-action@v2
@@ -280,3 +334,40 @@ jobs:
           containerAppName: ${{ secrets.MMR_API_CONTAINER_APP_NAME }}
           resourceGroup: ${{ secrets.RESOURCE_GROUP }}
           targetPort: 8080
+          environmentVariables: ADMIN_SECRET=secretref:mmr-admin-secret
+
+      - name: MMR API deploy diagnostics (post-deploy)
+        if: inputs.component == 'mmr-api'
+        env:
+          MMR_API_CONTAINER_APP_NAME: ${{ secrets.MMR_API_CONTAINER_APP_NAME }}
+          RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
+        run: |
+          echo "MMR API deploy post-deploy diagnostics"
+          FQDN="$(az containerapp show \
+            --name "${MMR_API_CONTAINER_APP_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --query "properties.configuration.ingress.fqdn" \
+            -o tsv)"
+
+          TARGET_PORT="$(az containerapp show \
+            --name "${MMR_API_CONTAINER_APP_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --query "properties.configuration.ingress.targetPort" \
+            -o tsv)"
+
+          echo "MMR API ingress fqdn: ${FQDN}"
+          echo "MMR API target port: ${TARGET_PORT}"
+
+          if [ "${TARGET_PORT}" != "8080" ]; then
+            echo "::error::MMR API targetPort is ${TARGET_PORT}, expected 8080."
+            exit 1
+          fi
+
+          echo "Checking deployed MMR API reachability"
+          if curl --silent --show-error --fail --location --max-time 20 \
+            "https://${FQDN}/swagger" >/dev/null; then
+            echo "MMR API reachable at https://${FQDN}/swagger"
+          else
+            echo "::error::Deployed MMR API is not reachable at https://${FQDN}/swagger"
+            exit 1
+          fi
