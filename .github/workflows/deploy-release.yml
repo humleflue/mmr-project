@@ -68,6 +68,55 @@ jobs:
             echo "::warning::CLERK_SECRET_KEY is empty. Frontend auth will fail with 500."
           fi
 
+      - name: Prepare and validate Clerk keys
+        if: inputs.component == 'frontend'
+        id: clerk_keys
+        env:
+          RAW_PUBLISHABLE_KEY: ${{ secrets['CLERK_PUBLISHABLE_KEY'] }}
+          RAW_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+        run: |
+          sanitize() {
+            value="$1"
+            # Remove CR/LF and trim one pair of surrounding double quotes.
+            value="$(printf '%s' "$value" | tr -d '\r\n')"
+            value="${value#\"}"
+            value="${value%\"}"
+            printf '%s' "$value"
+          }
+
+          PUBLISHABLE_KEY="$(sanitize "${RAW_PUBLISHABLE_KEY}")"
+          SECRET_KEY="$(sanitize "${RAW_SECRET_KEY}")"
+
+          echo "::add-mask::${PUBLISHABLE_KEY}"
+          echo "::add-mask::${SECRET_KEY}"
+
+          if [ -z "${PUBLISHABLE_KEY}" ]; then
+            echo "::error::CLERK_PUBLISHABLE_KEY is empty after sanitization."
+            exit 1
+          fi
+
+          if [ -z "${SECRET_KEY}" ]; then
+            echo "::error::CLERK_SECRET_KEY is empty after sanitization."
+            exit 1
+          fi
+
+          if ! printf '%s' "${PUBLISHABLE_KEY}" | grep -Eq '^pk_(test|live)_.+'; then
+            echo "::error::CLERK_PUBLISHABLE_KEY format is invalid. Expected prefix pk_test_ or pk_live_."
+            exit 1
+          fi
+
+          if ! printf '%s' "${SECRET_KEY}" | grep -Eq '^sk_(test|live)_.+'; then
+            echo "::error::CLERK_SECRET_KEY format is invalid. Expected prefix sk_test_ or sk_live_."
+            exit 1
+          fi
+
+          echo "publishable_key=${PUBLISHABLE_KEY}" >> "$GITHUB_OUTPUT"
+          echo "secret_key=${SECRET_KEY}" >> "$GITHUB_OUTPUT"
+
+          echo "Prepared Clerk keys successfully"
+          echo "publishable key prefix: ${PUBLISHABLE_KEY%%_*}_$(printf '%s' "${PUBLISHABLE_KEY#*_}" | cut -d '_' -f1)"
+          echo "secret key prefix: ${SECRET_KEY%%_*}_$(printf '%s' "${SECRET_KEY#*_}" | cut -d '_' -f1)"
+
       - name: Deploy frontend release
         if: inputs.component == 'frontend'
         uses: azure/container-apps-deploy-action@v2
@@ -76,10 +125,8 @@ jobs:
           dockerfilePath: Dockerfile
           acrName: ${{ secrets.ACR_NAME }}
           buildArguments: |
-            PUBLIC_CLERK_PUBLISHABLE_KEY=${{ secrets['CLERK_PUBLISHABLE_KEY'] }}
-          environmentVariables: |
-            PUBLIC_CLERK_PUBLISHABLE_KEY=${{ secrets['CLERK_PUBLISHABLE_KEY'] }}
-            CLERK_SECRET_KEY=${{ secrets.CLERK_SECRET_KEY }}
+            PUBLIC_CLERK_PUBLISHABLE_KEY=${{ steps.clerk_keys.outputs.publishable_key }}
+          environmentVariables: PUBLIC_CLERK_PUBLISHABLE_KEY=${{ steps.clerk_keys.outputs.publishable_key }} CLERK_SECRET_KEY=${{ steps.clerk_keys.outputs.secret_key }}
           containerAppName: ${{ secrets.UI_CONTAINER_APP_NAME }}
           resourceGroup: ${{ secrets.RESOURCE_GROUP }}
           targetPort: 3000
