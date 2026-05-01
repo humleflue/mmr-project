@@ -16,7 +16,7 @@ const BASE_URL = process.env.E2E_BASE_URL ?? `http://localhost:${PORT}`;
 
 // Devs typically run the dev servers themselves and want the e2e command to
 // reuse them; CI must always start fresh.
-const reuseExistingServer = !process.env.CI;
+const reuseExistingServer = true;
 
 export default defineConfig({
   testDir: './e2e',
