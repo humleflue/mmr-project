@@ -159,14 +159,82 @@ jobs:
             --query "properties.template.containers[0].env" \
             -o json
 
+      - name: API deploy diagnostics (preflight)
+        if: inputs.component == 'api'
+        env:
+          API_DB_CONNECTION_STRING: ${{ secrets.API_DB_CONNECTION_STRING }}
+          AUTHORIZATION_ISSUER: ${{ secrets.CLERK_ISSUER_URL }}
+          MMR_API_BASE_URL: ${{ secrets.MMR_API_BASE_URL }}
+          MMR_API_KEY: ${{ secrets.MMR_API_KEY }}
+          API_CONTAINER_APP_NAME: ${{ secrets.API_CONTAINER_APP_NAME }}
+          RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
+        run: |
+          echo "API deploy preflight diagnostics"
+          echo "Container app: ${API_CONTAINER_APP_NAME}"
+          echo "Resource group: ${RESOURCE_GROUP}"
+
+          if [ -n "${API_DB_CONNECTION_STRING}" ]; then
+            echo "API_DB_CONNECTION_STRING configured: yes"
+            echo "API_DB_CONNECTION_STRING length: ${#API_DB_CONNECTION_STRING}"
+          else
+            echo "::error::API_DB_CONNECTION_STRING is empty."
+            exit 1
+          fi
+
+          if [ -n "${AUTHORIZATION_ISSUER}" ]; then
+            echo "AUTHORIZATION_ISSUER configured: yes"
+            echo "AUTHORIZATION_ISSUER length: ${#AUTHORIZATION_ISSUER}"
+          else
+            echo "::error::AUTHORIZATION_ISSUER is empty."
+            exit 1
+          fi
+
+          if [ -n "${MMR_API_BASE_URL}" ]; then
+            echo "MMR_API_BASE_URL configured: yes"
+            echo "MMR_API_BASE_URL length: ${#MMR_API_BASE_URL}"
+          else
+            echo "::error::MMR_API_BASE_URL is empty."
+            exit 1
+          fi
+
+          if [ -n "${MMR_API_KEY}" ]; then
+            echo "MMR_API_KEY configured: yes"
+            echo "MMR_API_KEY length: ${#MMR_API_KEY}"
+          else
+            echo "::error::MMR_API_KEY is empty."
+            exit 1
+          fi
+
       - name: Deploy api release
         if: inputs.component == 'api'
         uses: azure/container-apps-deploy-action@v2
         with:
           appSourcePath: ${{ github.workspace }}/api/MMRProject.Api
           acrName: ${{ secrets.ACR_NAME }}
+          environmentVariables: ConnectionStrings__ApiDbContext=${{ secrets.API_DB_CONNECTION_STRING }} Authorization__Issuer=${{ secrets.CLERK_ISSUER_URL }} MMRCalculationAPI__BaseUrl=${{ secrets.MMR_API_BASE_URL }} MMRCalculationAPI__ApiKey=${{ secrets.MMR_API_KEY }} Migration__Enabled=true
           containerAppName: ${{ secrets.API_CONTAINER_APP_NAME }}
           resourceGroup: ${{ secrets.RESOURCE_GROUP }}
+
+      - name: API deploy diagnostics (post-deploy)
+        if: inputs.component == 'api'
+        env:
+          API_CONTAINER_APP_NAME: ${{ secrets.API_CONTAINER_APP_NAME }}
+          RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
+        run: |
+          echo "API deploy post-deploy diagnostics"
+          echo "Latest revision:"
+          az containerapp show \
+            --name "${API_CONTAINER_APP_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --query "properties.latestRevisionName" \
+            -o tsv
+
+          echo "Configured container environment variable names:"
+          az containerapp show \
+            --name "${API_CONTAINER_APP_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --query "properties.template.containers[0].env[].name" \
+            -o tsv
 
       - name: Deploy mmr-api release
         if: inputs.component == 'mmr-api'
