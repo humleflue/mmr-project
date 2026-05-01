@@ -205,13 +205,32 @@ jobs:
             exit 1
           fi
 
+      - name: Ensure API container app secrets
+        if: inputs.component == 'api'
+        env:
+          API_DB_CONNECTION_STRING: ${{ secrets.API_DB_CONNECTION_STRING }}
+          MMR_API_KEY: ${{ secrets.MMR_API_KEY }}
+          API_CONTAINER_APP_NAME: ${{ secrets.API_CONTAINER_APP_NAME }}
+          RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
+        run: |
+          echo "Creating/updating container app secrets"
+          az containerapp secret set \
+            --name "${API_CONTAINER_APP_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --secrets API_DB_CONNECTION_STRING="${API_DB_CONNECTION_STRING}" MMR_API_KEY="${MMR_API_KEY}"
+
       - name: Deploy api release
         if: inputs.component == 'api'
         uses: azure/container-apps-deploy-action@v2
         with:
           appSourcePath: ${{ github.workspace }}/api/MMRProject.Api
           acrName: ${{ secrets.ACR_NAME }}
-          environmentVariables: ConnectionStrings__ApiDbContext=${{ secrets.API_DB_CONNECTION_STRING }} Authorization__Issuer=${{ secrets.CLERK_ISSUER_URL }} MMRCalculationAPI__BaseUrl=${{ secrets.MMR_API_BASE_URL }} MMRCalculationAPI__ApiKey=${{ secrets.MMR_API_KEY }} Migration__Enabled=true
+          environmentVariables: >-
+            ConnectionStrings__ApiDbContext=secretref:API_DB_CONNECTION_STRING
+            Authorization__Issuer=${{ secrets.CLERK_ISSUER_URL }}
+            MMRCalculationAPI__BaseUrl=${{ secrets.MMR_API_BASE_URL }}
+            MMRCalculationAPI__ApiKey=secretref:MMR_API_KEY
+            Migration__Enabled=true
           containerAppName: ${{ secrets.API_CONTAINER_APP_NAME }}
           resourceGroup: ${{ secrets.RESOURCE_GROUP }}
 
