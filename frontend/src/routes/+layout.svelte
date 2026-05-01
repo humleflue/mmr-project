@@ -1,11 +1,12 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { ClerkProvider } from 'svelte-clerk';
+  import { PUBLIC_CLERK_PUBLISHABLE_KEY } from '$env/static/public';
   import '../app.pcss';
 
   const { children }: { children: Snippet } = $props();
 </script>
 
-<ClerkProvider>
+<ClerkProvider publishableKey={PUBLIC_CLERK_PUBLISHABLE_KEY}>
   {@render children()}
 </ClerkProvider>
