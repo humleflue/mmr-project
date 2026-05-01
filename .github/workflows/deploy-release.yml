@@ -217,7 +217,7 @@ jobs:
           az containerapp secret set \
             --name "${API_CONTAINER_APP_NAME}" \
             --resource-group "${RESOURCE_GROUP}" \
-            --secrets API_DB_CONNECTION_STRING="${API_DB_CONNECTION_STRING}" MMR_API_KEY="${MMR_API_KEY}"
+            --secrets api-db-connection-string="${API_DB_CONNECTION_STRING}" mmr-api-key="${MMR_API_KEY}"
 
       - name: Deploy api release
         if: inputs.component == 'api'
@@ -226,10 +226,10 @@ jobs:
           appSourcePath: ${{ github.workspace }}/api/MMRProject.Api
           acrName: ${{ secrets.ACR_NAME }}
           environmentVariables: >-
-            ConnectionStrings__ApiDbContext=secretref:API_DB_CONNECTION_STRING
+            ConnectionStrings__ApiDbContext=secretref:api-db-connection-string
             Authorization__Issuer=${{ secrets.CLERK_ISSUER_URL }}
             MMRCalculationAPI__BaseUrl=${{ secrets.MMR_API_BASE_URL }}
-            MMRCalculationAPI__ApiKey=secretref:MMR_API_KEY
+            MMRCalculationAPI__ApiKey=secretref:mmr-api-key
             Migration__Enabled=true
           containerAppName: ${{ secrets.API_CONTAINER_APP_NAME }}
           resourceGroup: ${{ secrets.RESOURCE_GROUP }}
