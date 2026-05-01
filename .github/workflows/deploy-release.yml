@@ -65,8 +65,11 @@ jobs:
         uses: azure/container-apps-deploy-action@v2
         with:
           appSourcePath: ${{ github.workspace }}/frontend
+          dockerfilePath: Dockerfile
           acrName: ${{ secrets.ACR_NAME }}
           buildArguments: |
+            PUBLIC_CLERK_PUBLISHABLE_KEY=${{ secrets['CLERK_PUBLISHABLE_KEY'] }}
+          environmentVariables: |
             PUBLIC_CLERK_PUBLISHABLE_KEY=${{ secrets['CLERK_PUBLISHABLE_KEY'] }}
           containerAppName: ${{ secrets.UI_CONTAINER_APP_NAME }}
           resourceGroup: ${{ secrets.RESOURCE_GROUP }}
@@ -92,6 +95,13 @@ jobs:
             --resource-group "${RESOURCE_GROUP}" \
             --query "properties.template.containers[0].env[].name" \
             -o tsv
+
+          echo "Configured container environment variable entries:"
+          az containerapp show \
+            --name "${UI_CONTAINER_APP_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --query "properties.template.containers[0].env" \
+            -o json
 
       - name: Deploy api release
         if: inputs.component == 'api'
