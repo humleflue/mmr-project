@@ -47,6 +47,7 @@ jobs:
         env:
           CLERK_PUBLISHABLE_KEY: ${{ secrets['CLERK_PUBLISHABLE_KEY'] }}
           CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+          FRONTEND_API_BASE_PATH: ${{ secrets.API_BASE_PATH }}
           UI_CONTAINER_APP_NAME: ${{ secrets.UI_CONTAINER_APP_NAME }}
           RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
         run: |
@@ -66,6 +67,14 @@ jobs:
             echo "CLERK_SECRET_KEY length: ${#CLERK_SECRET_KEY}"
           else
             echo "::warning::CLERK_SECRET_KEY is empty. Frontend auth will fail with 500."
+          fi
+
+          if [ -n "${FRONTEND_API_BASE_PATH}" ]; then
+            echo "API_BASE_PATH configured: yes"
+            echo "API_BASE_PATH value: ${FRONTEND_API_BASE_PATH}"
+          else
+            echo "::error::API_BASE_PATH is empty. Frontend server API calls will fail."
+            exit 1
           fi
 
       - name: Prepare and validate Clerk keys
@@ -126,7 +135,7 @@ jobs:
           acrName: ${{ secrets.ACR_NAME }}
           buildArguments: |
             PUBLIC_CLERK_PUBLISHABLE_KEY=${{ steps.clerk_keys.outputs.publishable_key }}
-          environmentVariables: PUBLIC_CLERK_PUBLISHABLE_KEY=${{ steps.clerk_keys.outputs.publishable_key }} CLERK_SECRET_KEY=${{ steps.clerk_keys.outputs.secret_key }}
+          environmentVariables: PUBLIC_CLERK_PUBLISHABLE_KEY=${{ steps.clerk_keys.outputs.publishable_key }} CLERK_SECRET_KEY=${{ steps.clerk_keys.outputs.secret_key }} API_BASE_PATH=${{ secrets.API_BASE_PATH }}
           containerAppName: ${{ secrets.UI_CONTAINER_APP_NAME }}
           resourceGroup: ${{ secrets.RESOURCE_GROUP }}
           targetPort: 3000
@@ -157,6 +166,13 @@ jobs:
             --name "${UI_CONTAINER_APP_NAME}" \
             --resource-group "${RESOURCE_GROUP}" \
             --query "properties.template.containers[0].env" \
+            -o json
+
+          echo "Effective API_BASE_PATH entry:"
+          az containerapp show \
+            --name "${UI_CONTAINER_APP_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --query "properties.template.containers[0].env[?name=='API_BASE_PATH'] | [0]" \
             -o json
 
       - name: API deploy diagnostics (preflight)

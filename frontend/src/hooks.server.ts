@@ -7,8 +7,12 @@ import { env } from '$env/dynamic/private';
 import { env as publicEnv } from '$env/dynamic/public';
 
 const clerkPublishableKey = publicEnv.PUBLIC_CLERK_PUBLISHABLE_KEY;
+const apiBasePath = env.API_BASE_PATH;
 console.info(
   `[startup] PUBLIC_CLERK_PUBLISHABLE_KEY configured=${Boolean(clerkPublishableKey)} length=${clerkPublishableKey?.length ?? 0}`
+);
+console.info(
+  `[startup] API_BASE_PATH configured=${Boolean(apiBasePath)} value=${apiBasePath ?? ''}`
 );
 
 const authGuard: Handle = async ({ event, resolve }) => {
