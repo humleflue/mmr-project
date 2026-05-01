@@ -4,6 +4,12 @@ import { redirect, type Handle, type HandleFetch } from '@sveltejs/kit';
 import { sequence } from '@sveltejs/kit/hooks';
 import { withClerkHandler } from 'svelte-clerk/server';
 import { env } from '$env/dynamic/private';
+import { env as publicEnv } from '$env/dynamic/public';
+
+const clerkPublishableKey = publicEnv.PUBLIC_CLERK_PUBLISHABLE_KEY;
+console.info(
+  `[startup] PUBLIC_CLERK_PUBLISHABLE_KEY configured=${Boolean(clerkPublishableKey)} length=${clerkPublishableKey?.length ?? 0}`
+);
 
 const authGuard: Handle = async ({ event, resolve }) => {
   const { userId } = event.locals.auth();
