@@ -279,3 +279,4 @@ jobs:
           acrName: ${{ secrets.ACR_NAME }}
           containerAppName: ${{ secrets.MMR_API_CONTAINER_APP_NAME }}
           resourceGroup: ${{ secrets.RESOURCE_GROUP }}
+          targetPort: 8080
