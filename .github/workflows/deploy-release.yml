@@ -46,6 +46,7 @@ jobs:
         if: inputs.component == 'frontend'
         env:
           CLERK_PUBLISHABLE_KEY: ${{ secrets['CLERK_PUBLISHABLE_KEY'] }}
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
           UI_CONTAINER_APP_NAME: ${{ secrets.UI_CONTAINER_APP_NAME }}
           RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
         run: |
@@ -60,6 +61,13 @@ jobs:
             echo "::warning::CLERK_PUBLISHABLE_KEY is empty. Frontend auth will fail with 500."
           fi
 
+          if [ -n "${CLERK_SECRET_KEY}" ]; then
+            echo "CLERK_SECRET_KEY configured: yes"
+            echo "CLERK_SECRET_KEY length: ${#CLERK_SECRET_KEY}"
+          else
+            echo "::warning::CLERK_SECRET_KEY is empty. Frontend auth will fail with 500."
+          fi
+
       - name: Deploy frontend release
         if: inputs.component == 'frontend'
         uses: azure/container-apps-deploy-action@v2
@@ -71,6 +79,7 @@ jobs:
             PUBLIC_CLERK_PUBLISHABLE_KEY=${{ secrets['CLERK_PUBLISHABLE_KEY'] }}
           environmentVariables: |
             PUBLIC_CLERK_PUBLISHABLE_KEY=${{ secrets['CLERK_PUBLISHABLE_KEY'] }}
+            CLERK_SECRET_KEY=${{ secrets.CLERK_SECRET_KEY }}
           containerAppName: ${{ secrets.UI_CONTAINER_APP_NAME }}
           resourceGroup: ${{ secrets.RESOURCE_GROUP }}
           targetPort: 3000
