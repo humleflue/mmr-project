@@ -553,12 +553,10 @@ public class V3MatchesService(
         }
         else
         {
-            // Whole-season replay — reset every affected player to their
-            // most recent rating from a prior season. The first replayed
-            // match for each player will be flagged IsPreviousSeasonRating,
-            // and the calculator applies the soft reset (mu collapses
-            // 2/3 toward the default, sigma resets) at calc time.
-            // Players with no prior-season history fall back to defaults.
+            // Whole-season replay — snap every affected player to their most
+            // recent prior-season rating snapshot (or defaults if none). The
+            // calculator decides what to do with previous-season inputs; this
+            // service only carries them forward.
             var preSeasonRatings = await dbContext.RatingHistories
                 .Where(rh => affectedPlayerIds.Contains(rh.LeaguePlayerId))
                 .Join(
@@ -603,9 +601,9 @@ public class V3MatchesService(
 
         await dbContext.SaveChangesAsync();
 
-        // Track which players already have current-season history so the
-        // first replayed match for each of them gets flagged as a
-        // previous-season rating (delta=0, soft reset applied by calculator).
+        // Drives the IsPreviousSeasonRating flag on each replayed match: a
+        // player not in this set when their match runs is treated as making
+        // their first appearance of the season.
         var playersWithCurrentSeasonHistory = await LoadPlayersWithSeasonHistoryAsync(
             currentSeason.Id, affectedPlayerIds);
 

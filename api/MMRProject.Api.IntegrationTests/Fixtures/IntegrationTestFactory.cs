@@ -80,21 +80,33 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>
 
 public class StubMMRCalculationApiClient : IMMRCalculationApiClient
 {
+    private readonly List<MMRCalculationRequest> _requests = [];
+
     public bool ThrowOnCalculate { get; set; }
+
+    public IReadOnlyList<MMRCalculationRequest> Requests => _requests;
+
+    public void ResetRequests() => _requests.Clear();
 
     public Task<MMRCalculationResponse> CalculateMMRAsync(MMRCalculationRequest request)
     {
         if (ThrowOnCalculate)
             throw new InvalidOperationException("MMR calculation failed");
 
+        _requests.Add(request);
         return Task.FromResult(BuildResponse(request));
     }
 
     public Task<List<MMRCalculationResponse>> CalculateMMRBatchAsync(List<MMRCalculationRequest> requests)
     {
+        _requests.AddRange(requests);
         return Task.FromResult(requests.Select(BuildResponse).ToList());
     }
 
+    // Deterministic placeholder response. Tests should assert on the inputs the
+    // service passed (captured in Requests) and on what the service did with the
+    // response (delta=0 for first-of-season, etc.), NOT on the response shape —
+    // that's the real calculator's contract, not this stub's.
     private static MMRCalculationResponse BuildResponse(MMRCalculationRequest request)
     {
         var team1Delta = request.Team1.Score == request.Team2.Score
@@ -119,30 +131,12 @@ public class StubMMRCalculationApiClient : IMMRCalculationApiClient
         };
     }
 
-    // Mirrors the Go calculator's soft reset: when IsPreviousSeasonRating is true,
-    // the player's effective input becomes (mu - 25)/3 + 25, sigma=5 before the match
-    // delta is applied. Otherwise the provided mu/sigma are used as-is, falling back
-    // to defaults if either is missing.
     private static MMRCalculationPlayerResult BuildPlayerResult(MMRCalculationPlayerRating p, int matchDelta)
     {
-        decimal effectiveMu;
-        decimal effectiveSigma;
-
-        if (p.IsPreviousSeasonRating == true)
-        {
-            var inputMu = p.Mu ?? 25m;
-            effectiveMu = ((inputMu - 25m) / 3m) + 25m;
-            effectiveSigma = 5m;
-        }
-        else
-        {
-            effectiveMu = p.Mu ?? 25m;
-            effectiveSigma = p.Sigma ?? 8.333m;
-        }
-
-        var newMu = effectiveMu + (matchDelta / 100m);
-        var newSigma = Math.Max(effectiveSigma - 0.1m, 0.1m);
-
+        var inputMu = p.Mu ?? 25m;
+        var inputSigma = p.Sigma ?? 8.333m;
+        var newMu = inputMu + (matchDelta / 100m);
+        var newSigma = Math.Max(inputSigma - 0.1m, 0.1m);
         return new MMRCalculationPlayerResult
         {
             Id = p.Id,
