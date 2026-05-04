@@ -728,9 +728,8 @@ public class V3MatchesService(
     {
         if (playerIds.Count == 0) return [];
 
-        var playerIdList = playerIds.ToList();
         var seasonedIds = await dbContext.RatingHistories
-            .Where(rh => playerIdList.Contains(rh.LeaguePlayerId))
+            .Where(rh => playerIds.Contains(rh.LeaguePlayerId))
             .Join(
                 dbContext.Set<V3Match>(),
                 rh => rh.MatchId,
