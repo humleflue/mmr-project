@@ -109,25 +109,46 @@ public class StubMMRCalculationApiClient : IMMRCalculationApiClient
             Team1 = new MMRCalculationTeamResult
             {
                 Score = request.Team1.Score,
-                Players = request.Team1.Players.Select(p => new MMRCalculationPlayerResult
-                {
-                    Id = p.Id,
-                    Mu = (p.Mu ?? 25m) + (team1Delta / 100m),
-                    Sigma = Math.Max((p.Sigma ?? 8.333m) - 0.1m, 0.1m),
-                    MMR = (int)(1000 + Math.Round((((p.Mu ?? 25m) + (team1Delta / 100m)) - 25m) * 100m))
-                })
+                Players = request.Team1.Players.Select(p => BuildPlayerResult(p, team1Delta)),
             },
             Team2 = new MMRCalculationTeamResult
             {
                 Score = request.Team2.Score,
-                Players = request.Team2.Players.Select(p => new MMRCalculationPlayerResult
-                {
-                    Id = p.Id,
-                    Mu = (p.Mu ?? 25m) + (team2Delta / 100m),
-                    Sigma = Math.Max((p.Sigma ?? 8.333m) - 0.1m, 0.1m),
-                    MMR = (int)(1000 + Math.Round((((p.Mu ?? 25m) + (team2Delta / 100m)) - 25m) * 100m))
-                })
-            }
+                Players = request.Team2.Players.Select(p => BuildPlayerResult(p, team2Delta)),
+            },
+        };
+    }
+
+    // Mirrors the Go calculator's soft reset: when IsPreviousSeasonRating is true,
+    // the player's effective input becomes (mu - 25)/3 + 25, sigma=5 before the match
+    // delta is applied. Otherwise the provided mu/sigma are used as-is, falling back
+    // to defaults if either is missing.
+    private static MMRCalculationPlayerResult BuildPlayerResult(MMRCalculationPlayerRating p, int matchDelta)
+    {
+        decimal effectiveMu;
+        decimal effectiveSigma;
+
+        if (p.IsPreviousSeasonRating == true)
+        {
+            var inputMu = p.Mu ?? 25m;
+            effectiveMu = ((inputMu - 25m) / 3m) + 25m;
+            effectiveSigma = 5m;
+        }
+        else
+        {
+            effectiveMu = p.Mu ?? 25m;
+            effectiveSigma = p.Sigma ?? 8.333m;
+        }
+
+        var newMu = effectiveMu + (matchDelta / 100m);
+        var newSigma = Math.Max(effectiveSigma - 0.1m, 0.1m);
+
+        return new MMRCalculationPlayerResult
+        {
+            Id = p.Id,
+            Mu = newMu,
+            Sigma = newSigma,
+            MMR = (int)(1000 + Math.Round((newMu - 25m) * 100m)),
         };
     }
 }

@@ -930,6 +930,213 @@ public class MatchTests(PostgresFixture postgres) : IntegrationTestBase(postgres
     }
 
     [Fact]
+    public async Task SubmitMatch_FirstMatchOfNewSeason_AppliesSoftResetAndZeroDelta()
+    {
+        var org = await CreateOrganization();
+        var league = await CreateLeague(org.Id);
+
+        // Past season, so the first batch of matches builds skill.
+        await CreateSeason(org.Id, league.Id, DateTimeOffset.UtcNow.AddDays(-90));
+
+        var (_, _, player1) = await SeedTestUser(org.Id, league.Id, "p1", "p1@test.com",
+            OrganizationRole.Owner);
+        var (_, _, player2) = await SeedTestUser(org.Id, league.Id, "p2", "p2@test.com");
+        var (_, _, player3) = await SeedTestUser(org.Id, league.Id, "p3", "p3@test.com");
+        var (_, _, player4) = await SeedTestUser(org.Id, league.Id, "p4", "p4@test.com");
+
+        AuthenticateAs("p1");
+
+        // p1+p2 win three matches in the past season, building a clear skill edge.
+        for (var i = 0; i < 3; i++)
+        {
+            var response = await Client.PostAsJsonAsync(
+                $"api/v3/organizations/{org.Id}/leagues/{league.Id}/matches",
+                new SubmitMatchRequest
+                {
+                    Teams =
+                    [
+                        new SubmitMatchTeamRequest { Players = [player1.Id, player2.Id], Score = 10 },
+                        new SubmitMatchTeamRequest { Players = [player3.Id, player4.Id], Score = 5 }
+                    ]
+                });
+            response.EnsureSuccessStatusCode();
+        }
+
+        decimal endOfSeasonMu;
+        decimal endOfSeasonSigma;
+        long endOfSeasonMmr;
+        using (var scope = Factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<ApiDbContext>();
+            var lp = await dbContext.LeaguePlayers.FindAsync(player1.Id);
+            Assert.NotNull(lp);
+            endOfSeasonMu = lp!.Mu;
+            endOfSeasonSigma = lp.Sigma;
+            endOfSeasonMmr = lp.Mmr;
+
+            // Sanity: the past season's wins should have moved p1 above defaults.
+            Assert.True(endOfSeasonMu > 25m,
+                $"Expected end-of-past-season mu > 25, got {endOfSeasonMu}");
+            Assert.True(endOfSeasonSigma < 8m,
+                $"Expected end-of-past-season sigma < 8, got {endOfSeasonSigma}");
+        }
+
+        // New season starts. Subsequent matches go into this season.
+        await CreateSeason(org.Id, league.Id, DateTimeOffset.UtcNow);
+
+        var firstNewSeasonResponse = await Client.PostAsJsonAsync(
+            $"api/v3/organizations/{org.Id}/leagues/{league.Id}/matches",
+            new SubmitMatchRequest
+            {
+                Teams =
+                [
+                    new SubmitMatchTeamRequest { Players = [player1.Id, player2.Id], Score = 10 },
+                    new SubmitMatchTeamRequest { Players = [player3.Id, player4.Id], Score = 5 }
+                ]
+            });
+        firstNewSeasonResponse.EnsureSuccessStatusCode();
+        var firstNewSeasonMatch = await ReadJsonAsync<MatchResponse>(firstNewSeasonResponse);
+        Assert.NotNull(firstNewSeasonMatch);
+
+        using (var scope = Factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<ApiDbContext>();
+
+            // Each player's first-of-new-season RatingHistory should have delta=0.
+            var newSeasonHistories = await dbContext.RatingHistories
+                .Where(rh => rh.MatchId == firstNewSeasonMatch!.Id)
+                .ToListAsync();
+            Assert.Equal(4, newSeasonHistories.Count);
+            Assert.All(newSeasonHistories, rh => Assert.Equal(0, rh.Delta));
+
+            // The soft reset should have collapsed mu 2/3 toward the default and reset
+            // sigma to ~5 before the calc ran. Match-delta is small relative to those
+            // changes, so we can assert on the order-of-magnitude.
+            var p1Reload = await dbContext.LeaguePlayers.FindAsync(player1.Id);
+            Assert.NotNull(p1Reload);
+            // sigma was below 8 at end of past season; after soft reset to 5 then one
+            // match's small decrease, expect ~4.9.
+            Assert.True(p1Reload!.Sigma < 5.5m && p1Reload.Sigma > 3m,
+                $"Expected post-soft-reset sigma in (3, 5.5), got {p1Reload.Sigma}");
+            // mu compressed: (endMu - 25)/3 + 25, then plus a small winner delta.
+            var expectedSoftResetMu = ((endOfSeasonMu - 25m) / 3m) + 25m;
+            Assert.True(Math.Abs(p1Reload.Mu - expectedSoftResetMu) < 1m,
+                $"Expected post-soft-reset mu near {expectedSoftResetMu}, got {p1Reload.Mu}");
+        }
+
+        // A second match in the new season should produce a normal (non-zero) delta.
+        var secondNewSeasonResponse = await Client.PostAsJsonAsync(
+            $"api/v3/organizations/{org.Id}/leagues/{league.Id}/matches",
+            new SubmitMatchRequest
+            {
+                Teams =
+                [
+                    new SubmitMatchTeamRequest { Players = [player1.Id, player2.Id], Score = 10 },
+                    new SubmitMatchTeamRequest { Players = [player3.Id, player4.Id], Score = 5 }
+                ]
+            });
+        secondNewSeasonResponse.EnsureSuccessStatusCode();
+        var secondNewSeasonMatch = await ReadJsonAsync<MatchResponse>(secondNewSeasonResponse);
+
+        using (var scope = Factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<ApiDbContext>();
+            var secondHistories = await dbContext.RatingHistories
+                .Where(rh => rh.MatchId == secondNewSeasonMatch!.Id)
+                .ToListAsync();
+            Assert.Equal(4, secondHistories.Count);
+            Assert.All(secondHistories, rh => Assert.NotEqual(0, rh.Delta));
+        }
+    }
+
+    [Fact]
+    public async Task RecalculateMatches_WithoutFromMatchId_PreservesPreviousSeasonSkill()
+    {
+        var org = await CreateOrganization();
+        var league = await CreateLeague(org.Id);
+
+        await CreateSeason(org.Id, league.Id, DateTimeOffset.UtcNow.AddDays(-90));
+
+        var (_, _, player1) = await SeedTestUser(org.Id, league.Id, "p1", "p1@test.com",
+            OrganizationRole.Moderator);
+        var (_, _, player2) = await SeedTestUser(org.Id, league.Id, "p2", "p2@test.com");
+        var (_, _, player3) = await SeedTestUser(org.Id, league.Id, "p3", "p3@test.com");
+        var (_, _, player4) = await SeedTestUser(org.Id, league.Id, "p4", "p4@test.com");
+
+        AuthenticateAs("p1");
+
+        // Build a past-season skill profile.
+        for (var i = 0; i < 3; i++)
+        {
+            var response = await Client.PostAsJsonAsync(
+                $"api/v3/organizations/{org.Id}/leagues/{league.Id}/matches",
+                new SubmitMatchRequest
+                {
+                    Teams =
+                    [
+                        new SubmitMatchTeamRequest { Players = [player1.Id, player2.Id], Score = 10 },
+                        new SubmitMatchTeamRequest { Players = [player3.Id, player4.Id], Score = 5 }
+                    ]
+                });
+            response.EnsureSuccessStatusCode();
+        }
+
+        await CreateSeason(org.Id, league.Id, DateTimeOffset.UtcNow);
+
+        // Two matches in the new season.
+        for (var i = 0; i < 2; i++)
+        {
+            var response = await Client.PostAsJsonAsync(
+                $"api/v3/organizations/{org.Id}/leagues/{league.Id}/matches",
+                new SubmitMatchRequest
+                {
+                    Teams =
+                    [
+                        new SubmitMatchTeamRequest { Players = [player1.Id, player2.Id], Score = 10 },
+                        new SubmitMatchTeamRequest { Players = [player3.Id, player4.Id], Score = 5 }
+                    ]
+                });
+            response.EnsureSuccessStatusCode();
+        }
+
+        long mmrBeforeRecalc;
+        using (var scope = Factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<ApiDbContext>();
+            var lp = await dbContext.LeaguePlayers.FindAsync(player1.Id);
+            mmrBeforeRecalc = lp!.Mmr;
+        }
+
+        // Whole-season recalc should produce the same end-state, NOT collapse to defaults.
+        var recalcResponse = await Client.PostAsync(
+            $"api/v3/organizations/{org.Id}/leagues/{league.Id}/matches/recalculate",
+            null);
+        Assert.Equal(HttpStatusCode.OK, recalcResponse.StatusCode);
+
+        using (var scope = Factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<ApiDbContext>();
+            var lp = await dbContext.LeaguePlayers.FindAsync(player1.Id);
+            Assert.NotNull(lp);
+            // The replay must reproduce the same final MMR (deterministic stub +
+            // identical match sequence). This guarantees the previous-season skill
+            // was carried into the soft reset rather than wiped to defaults.
+            Assert.Equal(mmrBeforeRecalc, lp!.Mmr);
+
+            // The new season's first match (chronologically) for p1 should have
+            // delta=0 in the recalculated rating_histories.
+            var firstNewSeasonHistory = await dbContext.RatingHistories
+                .Where(rh => rh.LeaguePlayerId == player1.Id)
+                .Join(dbContext.Set<V3Match>(), rh => rh.MatchId, m => m.Id,
+                    (rh, m) => new { rh, m })
+                .OrderByDescending(x => x.m.SeasonId)
+                .ThenBy(x => x.m.PlayedAt)
+                .FirstAsync();
+            Assert.Equal(0, firstNewSeasonHistory.rh.Delta);
+        }
+    }
+
+    [Fact]
     public async Task RecalculateMatches_AsMember_Returns403()
     {
         var org = await CreateOrganization();
