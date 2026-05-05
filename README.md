@@ -1,5 +1,6 @@
 # MMR Project
 
+
 This repository contains a matchmaking and rating system split into three main components:
 
 1. **Frontend**: SvelteKit web application
