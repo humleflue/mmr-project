@@ -930,6 +930,235 @@ public class MatchTests(PostgresFixture postgres) : IntegrationTestBase(postgres
     }
 
     [Fact]
+    public async Task SubmitMatch_FirstMatchOfNewSeason_FlagsPreviousSeasonAndRecordsZeroDelta()
+    {
+        var org = await CreateOrganization();
+        var league = await CreateLeague(org.Id);
+        await CreateSeason(org.Id, league.Id, DateTimeOffset.UtcNow.AddDays(-90));
+
+        var (_, _, p1) = await SeedTestUser(org.Id, league.Id, "p1", "p1@test.com",
+            OrganizationRole.Owner);
+        var (_, _, p2) = await SeedTestUser(org.Id, league.Id, "p2", "p2@test.com");
+        var (_, _, p3) = await SeedTestUser(org.Id, league.Id, "p3", "p3@test.com");
+        var (_, _, p4) = await SeedTestUser(org.Id, league.Id, "p4", "p4@test.com");
+        Guid[] playerIds = [p1.Id, p2.Id, p3.Id, p4.Id];
+
+        AuthenticateAs("p1");
+
+        // One past-season match so each player has a prior rating row.
+        var pastResponse = await Client.PostAsJsonAsync(
+            $"api/v3/organizations/{org.Id}/leagues/{league.Id}/matches",
+            new SubmitMatchRequest
+            {
+                Teams =
+                [
+                    new SubmitMatchTeamRequest { Players = [p1.Id, p2.Id], Score = 10 },
+                    new SubmitMatchTeamRequest { Players = [p3.Id, p4.Id], Score = 5 }
+                ]
+            });
+        pastResponse.EnsureSuccessStatusCode();
+
+        // The lp values right now represent the end of the past season — what we
+        // expect the service to forward verbatim on the first new-season match.
+        Dictionary<Guid, (decimal Mu, decimal Sigma)> endOfPastSeasonByPlayer;
+        using (var scope = Factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<ApiDbContext>();
+            endOfPastSeasonByPlayer = (await dbContext.LeaguePlayers
+                .Where(lp => playerIds.Contains(lp.Id))
+                .ToListAsync())
+                .ToDictionary(lp => lp.Id, lp => (lp.Mu, lp.Sigma));
+        }
+
+        await CreateSeason(org.Id, league.Id, DateTimeOffset.UtcNow);
+        Factory.StubMmrCalculationApiClient.ResetRequests();
+
+        var firstResponse = await Client.PostAsJsonAsync(
+            $"api/v3/organizations/{org.Id}/leagues/{league.Id}/matches",
+            new SubmitMatchRequest
+            {
+                Teams =
+                [
+                    new SubmitMatchTeamRequest { Players = [p1.Id, p2.Id], Score = 10 },
+                    new SubmitMatchTeamRequest { Players = [p3.Id, p4.Id], Score = 5 }
+                ]
+            });
+        firstResponse.EnsureSuccessStatusCode();
+        var firstMatch = await ReadJsonAsync<MatchResponse>(firstResponse);
+        Assert.NotNull(firstMatch);
+
+        // Exactly one calc request was sent — the new-season match.
+        Assert.Single(Factory.StubMmrCalculationApiClient.Requests);
+        var firstRequest = Factory.StubMmrCalculationApiClient.Requests[0];
+        var firstRequestPlayers = firstRequest.Team1.Players.Concat(firstRequest.Team2.Players).ToList();
+
+        // Every player was flagged as bringing a previous-season rating.
+        Assert.Equal(4, firstRequestPlayers.Count);
+        Assert.All(firstRequestPlayers, p => Assert.True(p.IsPreviousSeasonRating));
+
+        // The mu/sigma the service sent are the end-of-past-season state, not
+        // defaults — i.e. previous-season skill is carried forward to the calc.
+        var expectedMu = endOfPastSeasonByPlayer.Values.Select(v => v.Mu).OrderBy(x => x).ToArray();
+        var expectedSigma = endOfPastSeasonByPlayer.Values.Select(v => v.Sigma).OrderBy(x => x).ToArray();
+        var actualMu = firstRequestPlayers.Select(p => p.Mu!.Value).OrderBy(x => x).ToArray();
+        var actualSigma = firstRequestPlayers.Select(p => p.Sigma!.Value).OrderBy(x => x).ToArray();
+        Assert.Equal(expectedMu, actualMu);
+        Assert.Equal(expectedSigma, actualSigma);
+
+        // Recorded delta is 0 for the first-of-season match.
+        using (var scope = Factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<ApiDbContext>();
+            var firstHistories = await dbContext.RatingHistories
+                .Where(rh => rh.MatchId == firstMatch!.Id)
+                .ToListAsync();
+            Assert.Equal(4, firstHistories.Count);
+            Assert.All(firstHistories, rh => Assert.Equal(0, rh.Delta));
+        }
+
+        // A second match in the new season: the players now have current-season
+        // history, so the flag is no longer set and the recorded delta is non-zero.
+        Factory.StubMmrCalculationApiClient.ResetRequests();
+        var secondResponse = await Client.PostAsJsonAsync(
+            $"api/v3/organizations/{org.Id}/leagues/{league.Id}/matches",
+            new SubmitMatchRequest
+            {
+                Teams =
+                [
+                    new SubmitMatchTeamRequest { Players = [p1.Id, p2.Id], Score = 10 },
+                    new SubmitMatchTeamRequest { Players = [p3.Id, p4.Id], Score = 5 }
+                ]
+            });
+        secondResponse.EnsureSuccessStatusCode();
+        var secondMatch = await ReadJsonAsync<MatchResponse>(secondResponse);
+
+        Assert.Single(Factory.StubMmrCalculationApiClient.Requests);
+        var secondRequest = Factory.StubMmrCalculationApiClient.Requests[0];
+        Assert.All(secondRequest.Team1.Players.Concat(secondRequest.Team2.Players),
+            p => Assert.False(p.IsPreviousSeasonRating ?? false));
+
+        using (var scope = Factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<ApiDbContext>();
+            var secondHistories = await dbContext.RatingHistories
+                .Where(rh => rh.MatchId == secondMatch!.Id)
+                .ToListAsync();
+            Assert.Equal(4, secondHistories.Count);
+            Assert.All(secondHistories, rh => Assert.NotEqual(0, rh.Delta));
+        }
+    }
+
+    [Fact]
+    public async Task RecalculateMatches_WholeSeasonReplay_FlagsFirstMatchOfNewSeason()
+    {
+        var org = await CreateOrganization();
+        var league = await CreateLeague(org.Id);
+        await CreateSeason(org.Id, league.Id, DateTimeOffset.UtcNow.AddDays(-90));
+
+        var (_, _, p1) = await SeedTestUser(org.Id, league.Id, "p1", "p1@test.com",
+            OrganizationRole.Moderator);
+        var (_, _, p2) = await SeedTestUser(org.Id, league.Id, "p2", "p2@test.com");
+        var (_, _, p3) = await SeedTestUser(org.Id, league.Id, "p3", "p3@test.com");
+        var (_, _, p4) = await SeedTestUser(org.Id, league.Id, "p4", "p4@test.com");
+        Guid[] playerIds = [p1.Id, p2.Id, p3.Id, p4.Id];
+
+        AuthenticateAs("p1");
+
+        // One past-season match.
+        var pastResponse = await Client.PostAsJsonAsync(
+            $"api/v3/organizations/{org.Id}/leagues/{league.Id}/matches",
+            new SubmitMatchRequest
+            {
+                Teams =
+                [
+                    new SubmitMatchTeamRequest { Players = [p1.Id, p2.Id], Score = 10 },
+                    new SubmitMatchTeamRequest { Players = [p3.Id, p4.Id], Score = 5 }
+                ]
+            });
+        pastResponse.EnsureSuccessStatusCode();
+
+        // Snapshot each player's last past-season rating row — what the recalc
+        // reset should restore them to before the new-season replay starts.
+        Dictionary<Guid, (decimal Mu, decimal Sigma)> lastPastSeasonRating;
+        using (var scope = Factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<ApiDbContext>();
+            lastPastSeasonRating = (await dbContext.LeaguePlayers
+                .Where(lp => playerIds.Contains(lp.Id))
+                .ToListAsync())
+                .ToDictionary(lp => lp.Id, lp => (lp.Mu, lp.Sigma));
+        }
+
+        await CreateSeason(org.Id, league.Id, DateTimeOffset.UtcNow);
+
+        // Two new-season matches.
+        for (var i = 0; i < 2; i++)
+        {
+            var response = await Client.PostAsJsonAsync(
+                $"api/v3/organizations/{org.Id}/leagues/{league.Id}/matches",
+                new SubmitMatchRequest
+                {
+                    Teams =
+                    [
+                        new SubmitMatchTeamRequest { Players = [p1.Id, p2.Id], Score = 10 },
+                        new SubmitMatchTeamRequest { Players = [p3.Id, p4.Id], Score = 5 }
+                    ]
+                });
+            response.EnsureSuccessStatusCode();
+        }
+
+        Factory.StubMmrCalculationApiClient.ResetRequests();
+
+        // Whole-season recalc replays only the new-season matches.
+        var recalcResponse = await Client.PostAsync(
+            $"api/v3/organizations/{org.Id}/leagues/{league.Id}/matches/recalculate",
+            null);
+        Assert.Equal(HttpStatusCode.OK, recalcResponse.StatusCode);
+
+        Assert.Equal(2, Factory.StubMmrCalculationApiClient.Requests.Count);
+
+        var firstReplay = Factory.StubMmrCalculationApiClient.Requests[0];
+        var firstReplayPlayers = firstReplay.Team1.Players.Concat(firstReplay.Team2.Players).ToList();
+
+        // First replayed match (the new season's first) was flagged, with input
+        // mu/sigma matching the players' end-of-past-season rating row — proves
+        // the reset carried previous-season skill forward instead of defaulting.
+        Assert.Equal(4, firstReplayPlayers.Count);
+        Assert.All(firstReplayPlayers, p => Assert.True(p.IsPreviousSeasonRating));
+
+        var expectedMu = lastPastSeasonRating.Values.Select(v => v.Mu).OrderBy(x => x).ToArray();
+        var expectedSigma = lastPastSeasonRating.Values.Select(v => v.Sigma).OrderBy(x => x).ToArray();
+        var actualMu = firstReplayPlayers.Select(p => p.Mu!.Value).OrderBy(x => x).ToArray();
+        var actualSigma = firstReplayPlayers.Select(p => p.Sigma!.Value).OrderBy(x => x).ToArray();
+        Assert.Equal(expectedMu, actualMu);
+        Assert.Equal(expectedSigma, actualSigma);
+
+        // Second replayed match: not flagged anymore.
+        var secondReplay = Factory.StubMmrCalculationApiClient.Requests[1];
+        Assert.All(secondReplay.Team1.Players.Concat(secondReplay.Team2.Players),
+            p => Assert.False(p.IsPreviousSeasonRating ?? false));
+
+        // First-of-season replay produces a delta=0 rating_histories row.
+        using (var scope = Factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<ApiDbContext>();
+            var newSeasonHistories = await dbContext.RatingHistories
+                .Join(dbContext.Set<V3Match>(), rh => rh.MatchId, m => m.Id, (rh, m) => new { rh, m })
+                .Where(x => x.m.LeagueId == league.Id)
+                .OrderBy(x => x.m.PlayedAt).ThenBy(x => x.m.RecordedAt).ThenBy(x => x.m.CreatedAt)
+                .Where(x => x.rh.LeaguePlayerId == p1.Id)
+                .Select(x => x.rh.Delta)
+                .ToListAsync();
+
+            // Past-season match (delta=0 because also first-ever match for p1) +
+            // two new-season matches. The first new-season delta must also be 0.
+            Assert.Equal(3, newSeasonHistories.Count);
+            Assert.Equal(0, newSeasonHistories[1]);
+            Assert.NotEqual(0, newSeasonHistories[2]);
+        }
+    }
+
+    [Fact]
     public async Task RecalculateMatches_AsMember_Returns403()
     {
         var org = await CreateOrganization();

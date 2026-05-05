@@ -553,17 +553,59 @@ public class V3MatchesService(
         }
         else
         {
-            // Recalc from the start of the season — every affected player
-            // resets to defaults.
+            // Whole-season replay — snap every affected player to their most
+            // recent prior-season rating snapshot (or defaults if none). The
+            // calculator decides what to do with previous-season inputs; this
+            // service only carries them forward.
+            var preSeasonRatings = await dbContext.RatingHistories
+                .Where(rh => affectedPlayerIds.Contains(rh.LeaguePlayerId))
+                .Join(
+                    dbContext.Set<V3Match>(),
+                    rh => rh.MatchId,
+                    m => m.Id,
+                    (rh, m) => new
+                    {
+                        rh.LeaguePlayerId,
+                        rh.Mmr,
+                        rh.Mu,
+                        rh.Sigma,
+                        m.SeasonId,
+                        m.PlayedAt,
+                        m.RecordedAt,
+                        m.CreatedAt,
+                    })
+                .Where(x => x.SeasonId != currentSeason.Id)
+                .GroupBy(x => x.LeaguePlayerId)
+                .Select(g => g.OrderByDescending(x => x.PlayedAt)
+                              .ThenByDescending(x => x.RecordedAt)
+                              .ThenByDescending(x => x.CreatedAt)
+                              .First())
+                .ToDictionaryAsync(x => x.LeaguePlayerId);
+
             foreach (var lp in leaguePlayers)
             {
-                lp.Mmr = DefaultMmr;
-                lp.Mu = DefaultMu;
-                lp.Sigma = DefaultSigma;
+                if (preSeasonRatings.TryGetValue(lp.Id, out var snapshot))
+                {
+                    lp.Mmr = snapshot.Mmr;
+                    lp.Mu = snapshot.Mu;
+                    lp.Sigma = snapshot.Sigma;
+                }
+                else
+                {
+                    lp.Mmr = DefaultMmr;
+                    lp.Mu = DefaultMu;
+                    lp.Sigma = DefaultSigma;
+                }
             }
         }
 
         await dbContext.SaveChangesAsync();
+
+        // Drives the IsPreviousSeasonRating flag on each replayed match: a
+        // player not in this set when their match runs is treated as making
+        // their first appearance of the season.
+        var playersWithCurrentSeasonHistory = await LoadPlayersWithSeasonHistoryAsync(
+            currentSeason.Id, affectedPlayerIds);
 
         // Replay in batches of 200 (matches v1 chunking) for fewer round trips
         // to the MMR calculation API.
@@ -572,7 +614,7 @@ public class V3MatchesService(
         for (var i = 0; i < matchesToReplay.Count; i += batchSize)
         {
             var batch = matchesToReplay.Skip(i).Take(batchSize).ToList();
-            await CalculateAndApplyMmrBatch(orgId, batch, leaguePlayerLookup);
+            await CalculateAndApplyMmrBatch(orgId, batch, leaguePlayerLookup, playersWithCurrentSeasonHistory);
         }
 
         return new RecalculateMatchesResponse
@@ -587,7 +629,8 @@ public class V3MatchesService(
     private async Task CalculateAndApplyMmrBatch(
         Guid orgId,
         List<V3Match> matches,
-        Dictionary<Guid, LeaguePlayer> leaguePlayerLookup)
+        Dictionary<Guid, LeaguePlayer> leaguePlayerLookup,
+        HashSet<Guid> playersWithCurrentSeasonHistory)
     {
         // Each match must be evaluated against the *previous* match's updated
         // ratings, so we have to walk sequentially. The chunking here only
@@ -618,8 +661,8 @@ public class V3MatchesService(
 
             var request = new MMRCalculationRequest
             {
-                Team1 = BuildTeam(teams[0], guidToIndex, leaguePlayerLookup),
-                Team2 = BuildTeam(teams[1], guidToIndex, leaguePlayerLookup),
+                Team1 = BuildTeam(teams[0], guidToIndex, leaguePlayerLookup, playersWithCurrentSeasonHistory),
+                Team2 = BuildTeam(teams[1], guidToIndex, leaguePlayerLookup, playersWithCurrentSeasonHistory),
             };
 
             var response = await mmrCalculationApiClient.CalculateMMRAsync(request);
@@ -631,7 +674,8 @@ public class V3MatchesService(
             foreach (var (leaguePlayerId, result) in playerResults)
             {
                 var lp = leaguePlayerLookup[leaguePlayerId];
-                var delta = result.MMR - lp.Mmr;
+                var isFirstMatchOfSeason = !playersWithCurrentSeasonHistory.Contains(leaguePlayerId);
+                var delta = isFirstMatchOfSeason ? 0 : result.MMR - lp.Mmr;
 
                 dbContext.Set<RatingHistory>().Add(new RatingHistory
                 {
@@ -647,6 +691,8 @@ public class V3MatchesService(
                 lp.Mmr = result.MMR;
                 lp.Mu = result.Mu;
                 lp.Sigma = result.Sigma;
+
+                playersWithCurrentSeasonHistory.Add(leaguePlayerId);
             }
         }
 
@@ -656,7 +702,8 @@ public class V3MatchesService(
     private static MMRCalculationTeam BuildTeam(
         MatchTeam team,
         Dictionary<Guid, long> guidToIndex,
-        Dictionary<Guid, LeaguePlayer> leaguePlayerLookup)
+        Dictionary<Guid, LeaguePlayer> leaguePlayerLookup,
+        HashSet<Guid> playersWithCurrentSeasonHistory)
     {
         return new MMRCalculationTeam
         {
@@ -669,9 +716,31 @@ public class V3MatchesService(
                     Id = guidToIndex[p.LeaguePlayerId],
                     Mu = lp.Mu,
                     Sigma = lp.Sigma,
+                    IsPreviousSeasonRating = !playersWithCurrentSeasonHistory.Contains(p.LeaguePlayerId),
                 };
             }).ToList(),
         };
+    }
+
+    private async Task<HashSet<Guid>> LoadPlayersWithSeasonHistoryAsync(
+        Guid seasonId,
+        IReadOnlyCollection<Guid> playerIds)
+    {
+        if (playerIds.Count == 0) return [];
+
+        var seasonedIds = await dbContext.RatingHistories
+            .Where(rh => playerIds.Contains(rh.LeaguePlayerId))
+            .Join(
+                dbContext.Set<V3Match>(),
+                rh => rh.MatchId,
+                m => m.Id,
+                (rh, m) => new { rh.LeaguePlayerId, m.SeasonId })
+            .Where(x => x.SeasonId == seasonId)
+            .Select(x => x.LeaguePlayerId)
+            .Distinct()
+            .ToListAsync();
+
+        return [.. seasonedIds];
     }
 
     private async Task<MatchResponse> LoadAndMapMatch(Guid orgId, Guid leagueId, Guid matchId)
@@ -696,19 +765,6 @@ public class V3MatchesService(
 
     private async Task CalculateAndApplyMmr(Guid orgId, V3Match match, List<LeaguePlayer> leaguePlayers)
     {
-        var playerMap = leaguePlayers.ToDictionary(lp => lp.Id);
-
-        // The MMR calculation API uses long IDs, so we create a mapping
-        var guidToIndex = new Dictionary<Guid, long>();
-        var indexToGuid = new Dictionary<long, Guid>();
-        long index = 1;
-        foreach (var player in leaguePlayers)
-        {
-            guidToIndex[player.Id] = index;
-            indexToGuid[index] = player.Id;
-            index++;
-        }
-
         var teams = match.Teams.OrderBy(t => t.Index).ToList();
         if (teams.Count != 2)
         {
@@ -716,36 +772,28 @@ public class V3MatchesService(
             return;
         }
 
+        var leaguePlayerLookup = leaguePlayers.ToDictionary(lp => lp.Id);
+        var playerIds = leaguePlayers.Select(lp => lp.Id).ToList();
+        var playersWithCurrentSeasonHistory = await LoadPlayersWithSeasonHistoryAsync(
+            match.SeasonId, playerIds);
+
+        var guidToIndex = new Dictionary<Guid, long>();
+        var indexToGuid = new Dictionary<long, Guid>();
+        long index = 1;
+        foreach (var team in teams)
+        {
+            foreach (var player in team.Players.OrderBy(p => p.Index))
+            {
+                guidToIndex[player.LeaguePlayerId] = index;
+                indexToGuid[index] = player.LeaguePlayerId;
+                index++;
+            }
+        }
+
         var mmrRequest = new MMRCalculationRequest
         {
-            Team1 = new MMRCalculationTeam
-            {
-                Score = teams[0].Score,
-                Players = teams[0].Players.Select(p =>
-                {
-                    var lp = playerMap[p.LeaguePlayerId];
-                    return new MMRCalculationPlayerRating
-                    {
-                        Id = guidToIndex[p.LeaguePlayerId],
-                        Mu = lp.Mu,
-                        Sigma = lp.Sigma,
-                    };
-                }),
-            },
-            Team2 = new MMRCalculationTeam
-            {
-                Score = teams[1].Score,
-                Players = teams[1].Players.Select(p =>
-                {
-                    var lp = playerMap[p.LeaguePlayerId];
-                    return new MMRCalculationPlayerRating
-                    {
-                        Id = guidToIndex[p.LeaguePlayerId],
-                        Mu = lp.Mu,
-                        Sigma = lp.Sigma,
-                    };
-                }),
-            },
+            Team1 = BuildTeam(teams[0], guidToIndex, leaguePlayerLookup, playersWithCurrentSeasonHistory),
+            Team2 = BuildTeam(teams[1], guidToIndex, leaguePlayerLookup, playersWithCurrentSeasonHistory),
         };
 
         MMRCalculationResponse mmrResponse;
@@ -765,9 +813,9 @@ public class V3MatchesService(
 
         foreach (var (leaguePlayerId, result) in playerResults)
         {
-            var leaguePlayer = playerMap[leaguePlayerId];
-            var previousMmr = leaguePlayer.Mmr;
-            var delta = result.MMR - previousMmr;
+            var leaguePlayer = leaguePlayerLookup[leaguePlayerId];
+            var isFirstMatchOfSeason = !playersWithCurrentSeasonHistory.Contains(leaguePlayerId);
+            var delta = isFirstMatchOfSeason ? 0 : result.MMR - leaguePlayer.Mmr;
 
             var ratingHistory = new RatingHistory
             {

@@ -80,21 +80,33 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>
 
 public class StubMMRCalculationApiClient : IMMRCalculationApiClient
 {
+    private readonly List<MMRCalculationRequest> _requests = [];
+
     public bool ThrowOnCalculate { get; set; }
+
+    public IReadOnlyList<MMRCalculationRequest> Requests => _requests;
+
+    public void ResetRequests() => _requests.Clear();
 
     public Task<MMRCalculationResponse> CalculateMMRAsync(MMRCalculationRequest request)
     {
         if (ThrowOnCalculate)
             throw new InvalidOperationException("MMR calculation failed");
 
+        _requests.Add(request);
         return Task.FromResult(BuildResponse(request));
     }
 
     public Task<List<MMRCalculationResponse>> CalculateMMRBatchAsync(List<MMRCalculationRequest> requests)
     {
+        _requests.AddRange(requests);
         return Task.FromResult(requests.Select(BuildResponse).ToList());
     }
 
+    // Deterministic placeholder response. Tests should assert on the inputs the
+    // service passed (captured in Requests) and on what the service did with the
+    // response (delta=0 for first-of-season, etc.), NOT on the response shape —
+    // that's the real calculator's contract, not this stub's.
     private static MMRCalculationResponse BuildResponse(MMRCalculationRequest request)
     {
         var team1Delta = request.Team1.Score == request.Team2.Score
@@ -109,25 +121,28 @@ public class StubMMRCalculationApiClient : IMMRCalculationApiClient
             Team1 = new MMRCalculationTeamResult
             {
                 Score = request.Team1.Score,
-                Players = request.Team1.Players.Select(p => new MMRCalculationPlayerResult
-                {
-                    Id = p.Id,
-                    Mu = (p.Mu ?? 25m) + (team1Delta / 100m),
-                    Sigma = Math.Max((p.Sigma ?? 8.333m) - 0.1m, 0.1m),
-                    MMR = (int)(1000 + Math.Round((((p.Mu ?? 25m) + (team1Delta / 100m)) - 25m) * 100m))
-                })
+                Players = request.Team1.Players.Select(p => BuildPlayerResult(p, team1Delta)),
             },
             Team2 = new MMRCalculationTeamResult
             {
                 Score = request.Team2.Score,
-                Players = request.Team2.Players.Select(p => new MMRCalculationPlayerResult
-                {
-                    Id = p.Id,
-                    Mu = (p.Mu ?? 25m) + (team2Delta / 100m),
-                    Sigma = Math.Max((p.Sigma ?? 8.333m) - 0.1m, 0.1m),
-                    MMR = (int)(1000 + Math.Round((((p.Mu ?? 25m) + (team2Delta / 100m)) - 25m) * 100m))
-                })
-            }
+                Players = request.Team2.Players.Select(p => BuildPlayerResult(p, team2Delta)),
+            },
+        };
+    }
+
+    private static MMRCalculationPlayerResult BuildPlayerResult(MMRCalculationPlayerRating p, int matchDelta)
+    {
+        var inputMu = p.Mu ?? 25m;
+        var inputSigma = p.Sigma ?? 8.333m;
+        var newMu = inputMu + (matchDelta / 100m);
+        var newSigma = Math.Max(inputSigma - 0.1m, 0.1m);
+        return new MMRCalculationPlayerResult
+        {
+            Id = p.Id,
+            Mu = newMu,
+            Sigma = newSigma,
+            MMR = (int)(1000 + Math.Round((newMu - 25m) * 100m)),
         };
     }
 }
